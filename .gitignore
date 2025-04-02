@@ -1,0 +1,58 @@
+# Ignore virtual environments
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# VSCode settings (if you use it)
+.vscode/
+
+# macOS files
+.DS_Store
+
+# Logs and runtime artifacts
+*.log
+*.sqlite3
+*.db
+*.pid
+
+# Environment/config
+.env
+*.env
+
+# Compiled or temp files
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Jupyter check (if you test stuff in notebooks later)
+.ipynb_checkpoints/
+
+# Backup and temp files
+*.bak
+*~
+*.swp
+
+# System-specific or JetBrains project files
+.idea/
+
+# Ignore contents of data folders, but keep the folder itself
+archive/*
+charts/*
+logs/*
+strategies/*
+transactions/*
+
+# Allow placeholder files like .gitkeep
+!archive/.gitkeep
+!charts/.gitkeep
+!logs/.gitkeep
+!strategies/.gitkeep
+!transactions/.gitkeep
+
