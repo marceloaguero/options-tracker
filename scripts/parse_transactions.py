@@ -144,7 +144,7 @@ if __name__ == '__main__':
                     'legs': legs,
                     'notes': '',
                     'tags': [],
-                    'roll_count': 0
+                    'roll_count': 0,
                 }
 
                 filename = f"{ticker}_{opened}.yaml"
