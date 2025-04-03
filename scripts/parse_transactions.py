@@ -18,7 +18,21 @@ def detect_strategy_type(legs):
     shorts = [leg for leg in legs if leg['side'] == 'short']
     longs = [leg for leg in legs if leg['side'] == 'long']
 
-    # Calendar 1-1-2 (1 debit spread + 2 short-term puts)
+    if len(puts) == 4 and all(leg['expiry'] == puts[0]['expiry'] for leg in puts):
+        sorted_puts = sorted(puts, key=lambda l: l['strike'])
+        if (sorted_puts[0]['side'] == 'long' and
+            sorted_puts[1]['side'] == 'short' and
+            sorted_puts[2]['side'] == 'short' and
+            sorted_puts[3]['side'] == 'long'):
+
+            lower_width = sorted_puts[1]['strike'] - sorted_puts[0]['strike']
+            upper_width = sorted_puts[3]['strike'] - sorted_puts[2]['strike']
+
+            if abs(lower_width - upper_width) < 0.01:
+                return "Put Condor"
+            else:
+                return "Broken Wing Put Condor"
+
     if len(puts) == 3 and len(shorts) == 2 and len(longs) == 1:
         short_puts = [leg for leg in shorts if leg['type'] == 'put']
         long_put = next((leg for leg in longs if leg['type'] == 'put'), None)
@@ -65,15 +79,62 @@ def generate_yaml_from_order(order_id, rows, existing_strategy_file=None, overri
             'strike': float(row['Strike Price']),
             'expiry': pd.to_datetime(row['Expiration Date']).strftime("%Y-%m-%d"),
             'contracts': int(row['Quantity']),
-            'entry_price': abs(float(row['Average Price']) / 100)
+            'entry_price': abs(float(str(row['Average Price']).replace(',', '')) / 100)
         }
         legs.append(leg)
-        gross_credit += float(row['Value'])
-        total_fees += float(row['Fees'])
+        gross_credit += float(str(row['Value']).replace(',', ''))
+        total_fees += float(str(row['Fees']).replace(',', ''))
 
     net_credit = round(abs(gross_credit) - abs(total_fees), 2)
     strategy_type = detect_strategy_type(legs)
 
+    print("📂 Open strategies:")
+    strategy_files = [
+        f for f in os.listdir(STRATEGY_DIR)
+        if f.endswith(".yaml") and normalize_ticker(f).startswith(normalize_ticker(ticker).lower())
+    ]
+    for i, fname in enumerate(strategy_files):
+        print(f" [{i}] {fname}")
+
+    is_roll = any('TO_CLOSE' in r['Action'] for r in rows) and any('TO_OPEN' in r['Action'] for r in rows)
+    if is_roll:
+        print("⚠️  This order may represent a roll (close + open legs). You may want to link this to an existing strategy.")
+
+    selected = input("Link to existing strategy? Enter number or leave blank to create new: ").strip()
+    if selected.isdigit():
+        selected_file = strategy_files[int(selected)]
+        path = os.path.join(STRATEGY_DIR, selected_file)
+        with open(path, 'r') as f:
+            existing = yaml.safe_load(f)
+
+        for row in rows:
+            if 'TO_CLOSE' in row['Action']:
+                strike = float(row['Strike Price'])
+                expiry = pd.to_datetime(row['Expiration Date']).strftime('%Y-%m-%d')
+                side = 'short' if 'SELL' in row['Action'] else 'long'
+                leg_type = row['Call or Put'].lower()
+                for leg in existing['legs']:
+                    if (leg['strike'] == strike and leg['expiry'] == expiry and
+                        leg['side'] == side and leg['type'] == leg_type and
+                        'status' not in leg):
+                        leg['status'] = 'closed'
+                        break
+
+        existing['legs'].extend(legs)
+        existing['initial_credit'] += net_credit
+        existing['order_ids'] = list(set(existing.get('order_ids', []) + [int(order_id)]))
+        existing['notes'] += f"\nRolled on {opened} (order #{order_id})"
+        existing['tags'] = list(set(existing.get('tags', []) + ['rolled']))
+        existing['roll_count'] = existing.get('roll_count', 0) + 1
+
+        with open(path, 'w') as f:
+            yaml.dump(existing, f)
+
+        print(f"🔄 Rolled into existing strategy: {selected_file}")
+        return
+
+    filename = f"{normalize_ticker(ticker).lower()}_{opened}.yaml"
+    path = os.path.join(STRATEGY_DIR, filename)
     strategy = {
         'strategy': strategy_type,
         'ticker': normalize_ticker(ticker),
@@ -86,28 +147,6 @@ def generate_yaml_from_order(order_id, rows, existing_strategy_file=None, overri
         'tags': [],
         'roll_count': 0
     }
-
-    if existing_strategy_file:
-        path = os.path.join(STRATEGY_DIR, existing_strategy_file)
-        with open(path, 'r') as f:
-            existing = yaml.safe_load(f)
-
-        existing['legs'].extend(legs)
-        existing['initial_credit'] += net_credit
-        existing['notes'] += f"\nRolled on {opened} (order #{order_id})"
-        if 'rolled' not in existing['tags']:
-            existing['tags'].append('rolled')
-        existing['roll_count'] = existing.get('roll_count', 0) + 1
-        existing['order_ids'] = list(set(existing.get('order_ids', []) + [int(order_id)]))
-
-        with open(path, 'w') as f:
-            yaml.dump(existing, f)
-
-        print(f"🔄 Updated existing strategy: {existing_strategy_file} (added legs from roll, +{net_credit} credit)")
-        return
-
-    filename = f"{normalize_ticker(ticker).lower()}_{opened}.yaml"
-    path = os.path.join(STRATEGY_DIR, filename)
     with open(path, 'w') as f:
         yaml.dump(strategy, f)
 
@@ -170,7 +209,6 @@ def process_expirations(df):
                 with open(path, 'w') as f:
                     yaml.dump(strategy, f)
                 print(f"♻️ Updated {fname} with expiration info")
-
 
 if __name__ == '__main__':
     ENABLE_MULTI_ORDER_DETECTION = True
