@@ -1,100 +1,73 @@
 # streamlit_app.py
+import streamlit as st
 import os
 import yaml
 import pandas as pd
-import streamlit as st
-from datetime import datetime
 
-# Paths
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-STRATEGY_DIR = os.path.join(BASE_DIR, "strategies")
-ARCHIVE_DIR = os.path.join(BASE_DIR, "archive")
-LOG_DIR = os.path.join(BASE_DIR, "logs")
+STRATEGY_DIR = os.path.join(os.path.dirname(__file__), 'strategies')
+ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), 'archive')
 
-# Load strategies from directory
-def load_strategies(dir_path):
+def load_strategies():
     strategies = []
-    for file in os.listdir(dir_path):
-        if file.endswith(".yaml"):
-            with open(os.path.join(dir_path, file)) as f:
-                yml = yaml.safe_load(f)
-                yml['file'] = file
-                yml['source'] = os.path.basename(dir_path)
-                strategies.append(yml)
+    for folder in [STRATEGY_DIR, ARCHIVE_DIR]:
+        for fname in os.listdir(folder):
+            if fname.endswith(".yaml"):
+                with open(os.path.join(folder, fname), 'r') as f:
+                    data = yaml.safe_load(f)
+                    data['file'] = fname
+                    data['folder'] = os.path.basename(folder)
+                    strategies.append(data)
     return pd.DataFrame(strategies)
 
-# Load daily log for a strategy
-def load_log(strategy_file):
-    csv_file = strategy_file.replace(".yaml", ".csv")
-    csv_path = os.path.join(LOG_DIR, csv_file)
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path, parse_dates=['Date'])
-        return df
-    return None
+def get_status_label(row):
+    if row['status'] == 'closed':
+        return 'Closed'
+    elif any('status' in leg and leg['status'] == 'expired' for leg in row['legs']):
+        return 'Partially Expired'
+    elif 'rolled' in row.get('tags', []):
+        return 'Rolled'
+    return 'Open'
 
-# Page layout
-st.set_page_config(layout="wide", page_title="Options Tracker")
-st.title("📘 Options Trading Journal")
+st.set_page_config(page_title="Options Tracker", layout="wide")
+st.title("📈 Options Strategy Tracker")
 
-# Load strategies
-open_df = load_strategies(STRATEGY_DIR)
-closed_df = load_strategies(ARCHIVE_DIR)
-all_df = pd.concat([open_df, closed_df], ignore_index=True)
+with st.sidebar:
+    st.header("🔍 Filters")
+    df = load_strategies()
+    df['status_label'] = df.apply(get_status_label, axis=1)
 
-# Sidebar filters
-st.sidebar.header("🔎 Filter Strategies")
-tickers = sorted(all_df['ticker'].dropna().unique())
-strategies = sorted(all_df['strategy'].dropna().unique())
-status = st.sidebar.radio("Status", ["All", "Open", "Closed"], index=0)
-ticker_filter = st.sidebar.multiselect("Ticker", tickers)
-strategy_filter = st.sidebar.multiselect("Strategy Type", strategies)
+    status_filter = st.multiselect("Status", options=df['status_label'].unique(), default=list(df['status_label'].unique()))
+    strategy_filter = st.multiselect("Strategy Type", options=df['strategy'].unique(), default=list(df['strategy'].unique()))
+    ticker_filter = st.multiselect("Ticker", options=df['ticker'].unique(), default=list(df['ticker'].unique()))
 
-# Apply filters
-filtered_df = all_df.copy()
-if status != "All":
-    filtered_df = filtered_df[filtered_df['status'] == status.lower()]
-if ticker_filter:
-    filtered_df = filtered_df[filtered_df['ticker'].isin(ticker_filter)]
-if strategy_filter:
-    filtered_df = filtered_df[filtered_df['strategy'].isin(strategy_filter)]
+filtered_df = df[
+    df['status_label'].isin(status_filter) &
+    df['strategy'].isin(strategy_filter) &
+    df['ticker'].isin(ticker_filter)
+]
 
-# Main table
-st.subheader("📂 Strategy List")
-display_cols = [c for c in ["ticker", "strategy", "status", "opened", "closed", "initial_credit", "realized_pnl", "file"] if c in filtered_df.columns]
+st.markdown(f"### Showing {len(filtered_df)} strategies")
 
-st.dataframe(
-    filtered_df[display_cols]
-    .fillna("-"),
-    use_container_width=True
-)
+for _, row in filtered_df.iterrows():
+    with st.expander(f"[{row['status_label']}] {row['strategy']} - {row['ticker']} ({row['opened']}) [{row['file']}]"):
+        st.markdown(f"**Status:** {row['status_label']}")
+        st.markdown(f"**Opened:** {row['opened']}")
+        if 'closed' in row:
+            st.markdown(f"**Closed:** {row['closed']}")
+        st.markdown(f"**Initial Credit:** ${row['initial_credit']:.2f}")
+        st.markdown(f"**Roll Count:** {row.get('roll_count', 0)}")
+        st.markdown(f"**Tags:** {', '.join(row.get('tags', [])) or 'None'}")
 
-# Detail view
-st.subheader("🔍 Strategy Detail")
-selected = st.selectbox("Select a strategy to view details:", filtered_df['file'])
-strategy = filtered_df[filtered_df['file'] == selected].iloc[0]
-st.markdown(f"### {strategy['ticker']} - {strategy['strategy']}")
-st.markdown(f"**Opened:** {strategy['opened']}  ")
-if 'closed' in strategy:
-    st.markdown(f"**Closed:** {strategy['closed']}  ")
-if 'initial_credit' in strategy:
-    st.markdown(f"**Initial Credit:** ${strategy['initial_credit']:.2f}  ")
-if 'realized_pnl' in strategy:
-    st.markdown(f"**Realized PnL:** ${strategy['realized_pnl']:.2f}  ")
-if 'roll_count' in strategy:
-    st.markdown(f"**Roll Count:** {strategy['roll_count']}")
-if strategy.get("tags"):
-    st.markdown(f"**Tags:** {', '.join(strategy['tags'])}")
+        st.markdown("---")
+        st.markdown("**Legs:**")
+        legs_df = pd.DataFrame(row['legs'])
+        if not legs_df.empty:
+            if 'status' not in legs_df.columns:
+                legs_df['status'] = 'active'
+            legs_df = legs_df[['side', 'type', 'contracts', 'strike', 'expiry', 'status']]
+            st.dataframe(legs_df, use_container_width=True)
 
-# Legs
-st.markdown("#### Legs")
-st.table(pd.DataFrame(strategy['legs']))
-
-# Log chart
-log_df = load_log(selected)
-if log_df is not None:
-    st.markdown("#### 📈 Daily Log")
-    metric = st.selectbox("Choose metric to plot:", [col for col in log_df.columns if col != "Date"])
-    st.line_chart(log_df.set_index("Date")[metric])
-else:
-    st.info("No daily log data found for this strategy.")
+        st.markdown("---")
+        st.markdown("**Notes:**")
+        st.code(row.get('notes', ''), language='markdown')
 
