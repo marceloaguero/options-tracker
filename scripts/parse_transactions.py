@@ -3,154 +3,17 @@ import os
 import pandas as pd
 import yaml
 from datetime import datetime
-from collections import defaultdict
-import shutil
-import re
-
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TRANSACTIONS_DIR = os.path.join(BASE_DIR, "transactions")
-STRATEGY_DIR = os.path.join(BASE_DIR, "strategies")
-ARCHIVE_DIR = os.path.join(BASE_DIR, "archive")
-
-def detect_strategy_type(legs):
-    puts = [leg for leg in legs if leg['type'] == 'put']
-    calls = [leg for leg in legs if leg['type'] == 'call']
-    shorts = [leg for leg in legs if leg['side'] == 'short']
-    longs = [leg for leg in legs if leg['side'] == 'long']
-
-    if len(puts) == 4 and all(leg['expiry'] == puts[0]['expiry'] for leg in puts):
-        sorted_puts = sorted(puts, key=lambda l: l['strike'])
-        if (sorted_puts[0]['side'] == 'long' and
-            sorted_puts[1]['side'] == 'short' and
-            sorted_puts[2]['side'] == 'short' and
-            sorted_puts[3]['side'] == 'long'):
-
-            lower_width = sorted_puts[1]['strike'] - sorted_puts[0]['strike']
-            upper_width = sorted_puts[3]['strike'] - sorted_puts[2]['strike']
-
-            if abs(lower_width - upper_width) < 0.01:
-                return "Put Condor"
-            else:
-                return "Broken Wing Put Condor"
-
-    if len(puts) == 3 and len(shorts) == 2 and len(longs) == 1:
-        short_puts = [leg for leg in shorts if leg['type'] == 'put']
-        long_put = next((leg for leg in longs if leg['type'] == 'put'), None)
-        if long_put:
-            long_expiry = long_put['expiry']
-            debit_spread_short = next((leg for leg in short_puts if leg['expiry'] == long_expiry), None)
-            near_term_puts = [leg for leg in short_puts if leg['expiry'] != long_expiry]
-            if debit_spread_short and len(near_term_puts) == 1:
-                return "Calendar 1-1-2"
-
-    if len(legs) == 1 and shorts:
-        return "Short Put" if puts else "Short Call"
-
-    return "Unnamed"
-
-def normalize_ticker(ticker):
-    ticker = ticker.replace('/', '').strip()
-    if ticker.startswith('.'):
-        ticker = ticker[1:]
-    match = re.match(r'^([A-Z]{1,3})', ticker.upper())
-    return match.group(1) if match else ticker
-
-def load_transaction_file(filepath):
-    df = pd.read_csv(filepath)
-    df = df[(df['Type'] == 'Trade') | ((df['Type'] == 'Receive Deliver') & (df['Sub Type'] == 'Expiration'))]
-    df = df[df['Instrument Type'].isin(['Equity Option', 'Future Option'])]
-    return df
-
-def generate_yaml_from_order(order_id, rows, existing_strategy_file=None, override_ticker=None):
-    sample = rows[0]
-    ticker = override_ticker if override_ticker else sample['Root Symbol'].strip()
-    opened = pd.to_datetime(sample['Date']).strftime("%Y-%m-%d")
-
-    legs = []
-    gross_credit = 0
-    total_fees = 0
-
-    for row in rows:
-        side = 'short' if 'SELL' in row['Action'] else 'long'
-        leg = {
-            'type': row['Call or Put'].lower(),
-            'ticker': row['Root Symbol'].strip(),
-            'side': side,
-            'strike': float(row['Strike Price']),
-            'expiry': pd.to_datetime(row['Expiration Date']).strftime("%Y-%m-%d"),
-            'contracts': int(row['Quantity']),
-            'entry_price': abs(float(str(row['Average Price']).replace(',', '')) / 100)
-        }
-        legs.append(leg)
-        gross_credit += float(str(row['Value']).replace(',', ''))
-        total_fees += float(str(row['Fees']).replace(',', ''))
-
-    net_credit = round(abs(gross_credit) - abs(total_fees), 2)
-    strategy_type = detect_strategy_type(legs)
-
-    print("📂 Open strategies:")
-    strategy_files = [
-        f for f in os.listdir(STRATEGY_DIR)
-        if f.endswith(".yaml") and normalize_ticker(f).startswith(normalize_ticker(ticker).lower())
-    ]
-    for i, fname in enumerate(strategy_files):
-        print(f" [{i}] {fname}")
-
-    is_roll = any('TO_CLOSE' in r['Action'] for r in rows) and any('TO_OPEN' in r['Action'] for r in rows)
-    if is_roll:
-        print("⚠️  This order may represent a roll (close + open legs). You may want to link this to an existing strategy.")
-
-    selected = input("Link to existing strategy? Enter number or leave blank to create new: ").strip()
-    if selected.isdigit():
-        selected_file = strategy_files[int(selected)]
-        path = os.path.join(STRATEGY_DIR, selected_file)
-        with open(path, 'r') as f:
-            existing = yaml.safe_load(f)
-
-        for row in rows:
-            if 'TO_CLOSE' in row['Action']:
-                strike = float(row['Strike Price'])
-                expiry = pd.to_datetime(row['Expiration Date']).strftime('%Y-%m-%d')
-                side = 'short' if 'SELL' in row['Action'] else 'long'
-                leg_type = row['Call or Put'].lower()
-                for leg in existing['legs']:
-                    if (leg['strike'] == strike and leg['expiry'] == expiry and
-                        leg['side'] == side and leg['type'] == leg_type and
-                        'status' not in leg):
-                        leg['status'] = 'closed'
-                        break
-
-        existing['legs'].extend(legs)
-        existing['initial_credit'] += net_credit
-        existing['order_ids'] = list(set(existing.get('order_ids', []) + [int(order_id)]))
-        existing['notes'] += f"\nRolled on {opened} (order #{order_id})"
-        existing['tags'] = list(set(existing.get('tags', []) + ['rolled']))
-        existing['roll_count'] = existing.get('roll_count', 0) + 1
-
-        with open(path, 'w') as f:
-            yaml.dump(existing, f)
-
-        print(f"🔄 Rolled into existing strategy: {selected_file}")
-        return
-
-    filename = f"{normalize_ticker(ticker).lower()}_{opened}.yaml"
-    path = os.path.join(STRATEGY_DIR, filename)
-    strategy = {
-        'strategy': strategy_type,
-        'ticker': normalize_ticker(ticker),
-        'opened': opened,
-        'status': 'open',
-        'initial_credit': net_credit,
-        'order_ids': [int(order_id)] if order_id else [],
-        'legs': legs,
-        'notes': '',
-        'tags': [],
-        'roll_count': 0
-    }
-    with open(path, 'w') as f:
-        yaml.dump(strategy, f)
-
-    print(f"✅ Created strategy YAML: {filename} (strategy: {strategy_type}, net credit after fees: {net_credit})")
+from helpers import (
+    STRATEGY_DIR,
+    TRANSACTIONS_DIR,
+    ARCHIVE_DIR,
+    load_transaction_file,
+    normalize_ticker,
+    detect_strategy_type,
+    generate_yaml_from_order,
+    update_strategy_with_roll,
+    match_legs
+)
 
 def process_expirations(df):
     exp_df = df[(df['Type'] == 'Receive Deliver') & (df['Sub Type'] == 'Expiration')]
@@ -232,5 +95,18 @@ if __name__ == '__main__':
             confirm = input("Generate strategy YAML from this multi-order group? [y/N]: ").strip().lower()
             if confirm == 'y':
                 order_id = int(rows['Order #'].iloc[0]) if 'Order #' in rows and not pd.isna(rows['Order #'].iloc[0]) else 0
-                generate_yaml_from_order(order_id, rows.to_dict(orient='records'))
+                existing_files = [f for f in os.listdir(STRATEGY_DIR) if f.endswith(".yaml")]
+                if existing_files:
+                    print("📂 Open strategies:")
+                    for idx, fname in enumerate(existing_files):
+                        print(f" [{idx}] {fname}")
+                roll_hint = any("CLOSE" in a for a in rows['Action']) and any("OPEN" in a for a in rows['Action'])
+                if roll_hint:
+                    print("⚠️  This order may represent a roll (close + open legs). You may want to link this to an existing strategy.")
+                index = input("Link to existing strategy? Enter number or leave blank to create new: ").strip()
+                if index.isdigit():
+                    strategy_file = existing_files[int(index)]
+                    update_strategy_with_roll(strategy_file, rows.to_dict(orient='records'), order_id, trade_date)
+                else:
+                    generate_yaml_from_order(order_id, rows.to_dict(orient='records'))
 
