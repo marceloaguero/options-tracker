@@ -18,14 +18,16 @@ def detect_strategy_type(legs):
     shorts = [leg for leg in legs if leg['side'] == 'short']
     longs = [leg for leg in legs if leg['side'] == 'long']
 
-    if len(legs) == 3 and len(puts) == 3 and len(shorts) == 2 and len(longs) == 1:
+    # Calendar 1-1-2 (1 debit spread + 2 short-term puts)
+    if len(puts) == 3 and len(shorts) == 2 and len(longs) == 1:
         short_puts = [leg for leg in shorts if leg['type'] == 'put']
-        long_puts = [leg for leg in longs if leg['type'] == 'put']
-        short_strikes = set(leg['strike'] for leg in short_puts)
-        short_expiries = set(leg['expiry'] for leg in short_puts)
-        long_expiry = long_puts[0]['expiry']
-        if len(short_strikes) == 1 and all(exp <= long_expiry for exp in short_expiries):
-            return "Calendar 1-1-2"
+        long_put = next((leg for leg in longs if leg['type'] == 'put'), None)
+        if long_put:
+            long_expiry = long_put['expiry']
+            debit_spread_short = next((leg for leg in short_puts if leg['expiry'] == long_expiry), None)
+            near_term_puts = [leg for leg in short_puts if leg['expiry'] != long_expiry]
+            if debit_spread_short and len(near_term_puts) == 1:
+                return "Calendar 1-1-2"
 
     if len(legs) == 1 and shorts:
         return "Short Put" if puts else "Short Call"
